@@ -9,7 +9,7 @@ from copy import deepcopy
 
 # Setting API parameters
 openai.api_base = "https://api.aiohub.org/v1"
-openai.api_key = 'YOUR-API-KEY-HERE'
+openai.api_key = ''
 #model="gpt-3.5-turbo-1106"
 model="gpt-4o"
 

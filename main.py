@@ -4,10 +4,12 @@ from tester_fuzz_agent import TesterFuzzAgent
 from fuzz_agent import InputMutatorAgent
 from executor_static import ExecutorStaticAgent
 from datasets import load_dataset
+from stage0_design import generate_sdc_document
 import json
 import os 
-import gzip
-        
+import time
+import re  # Added for Regex logic
+
 class MultiAgentSystem:
     def __init__(self, entry):
         self.programmer_agent = ProgrammerAgent(entry)
@@ -15,8 +17,11 @@ class MultiAgentSystem:
         self.executor_static = ExecutorStaticAgent(entry)
         self.code = None
         self.test_inputs = None
+        self.entry = entry # Store entry for the run method
 
-    def run(self,iterations=120):
+    # NOTE: Reduced iterations from 120 to 5 to protect your $5 budget!
+    def run(self, iterations=5):
+        entry = self.entry
         # Step 1: Programmer writes code
         self.code = self.programmer_agent.write_code()
         print(f"Programmer's Code:\n{self.code}")
@@ -29,9 +34,9 @@ class MultiAgentSystem:
 
         print('result')
         print(result)
-        # If error, give feedback to programmer agent up to 4 times
+        # If error, give feedback to programmer agent up to 3 times
         if result.name != FResult.SAFE.name:
-            for i in range(4):
+            for i in range(3):
                 self.code = self.programmer_agent.write_code_feedback_static(self.code, error_description, "")
                 result, error_description = self.executor_static.execute_static_analysis_gpt(self.code)
                 
@@ -48,7 +53,7 @@ class MultiAgentSystem:
         # Step 3: Fuzzing agent generates initial test inputs
         test_inputs_list = []
         self.test_inputs = self.tester_fuzz_agent.generate_test_inputs()
-        if (self.test_inputs == {}):
+        if (not self.test_inputs):
             #If no inputs generated for some reason, dynamic testing is not done
             task = {**problems[entry['ID']], "code": self.code, "fuzzing_inputs": test_inputs_list, "unit_test_status": "no unit tests", "static_analysis_status": static_analysis_status, "fuzzing_test_status": "No inputs created"}
             with open("results.json", 'a') as f:
@@ -97,8 +102,8 @@ class MultiAgentSystem:
             problems[entry['ID']]['initial_failed_inputs'] = failed_inputs_fuzz[:5].copy()
             problems[entry['ID']]['code_before_fuzz_fix'] = self.code
             fuzzing_test_status = 'fail'
-            # Give feedback to Coder up to 4 times
-            for i in range(4):
+            # Give feedback to Coder up to 3 times
+            for i in range(3):
                 print(f"will try to fix code from fuzz try {i+1}")
                 self.code = self.programmer_agent.write_code_feedback_fuzz(self.code, failed_inputs_fuzz[:5])
                 print(f"code changed in fuzz {i+1}")
@@ -143,24 +148,6 @@ class MultiAgentSystem:
 
 if __name__ == "__main__":
     
-    #Human eval dataset
-    #dataset = load_dataset("openai_humaneval",split="test")
-    #dataset = [entry for entry in dataset]
-    
-    #Path to your local humaneval.jsonl.gz file
-    #local_file = "./local_humaneval.gz"
-
-    #Function to read the dataset from the compressed jsonl.gz file
-    # def read_humaneval_dataset(file_path):
-    #    dataset = []
-    #    with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-    #        for line in f:
-    #            dataset.append(json.loads(line))
-    #    return dataset
-
-    # Load the dataset
-    #dataset = read_humaneval_dataset(local_file)
-    
     #Security Eval dataset
     local_file_jsonl = "./dataset copy.jsonl"
 
@@ -172,9 +159,69 @@ if __name__ == "__main__":
                 dataset.append(json.loads(line))
         return dataset
 
-    # Load the dataset
+   # Load the dataset
     dataset = read_dataset_jsonl(local_file_jsonl)
     
+    # =========================================================
+    # --- NEW ROBUST RESUME LOGIC (REGEX) STARTS HERE ---
+    # =========================================================
+    # completed_task_ids = set()
+    # if os.path.exists("results.json"):
+    #     with open("results.json", 'r', encoding='utf-8') as f:
+    #         content = f.read()
+    #         # Extract all IDs regardless of JSON formatting
+    #         matches = re.findall(r'"ID"\s*:\s*"([^"]+)"', content)
+    #         for match in matches:
+    #             completed_task_ids.add(match)
+                
+    # print(f"Found {len(completed_task_ids)} already completed tasks. Resuming...")
+    # =========================================================
+    # --- NEW ROBUST RESUME LOGIC (REGEX) ENDS HERE ---
+    # =========================================================
+
     for entry in dataset:
-            system = MultiAgentSystem(entry)
-            system.run()
+        # 1. Extract the original prompt (handles both 'Prompt' and 'prompt' keys)
+        original_prompt = entry.get('Prompt', entry.get('prompt', ''))
+        task_id = entry.get('ID', 'Unknown')
+        
+        # =========================================================
+        # --- SKIP LOGIC STARTS HERE ---
+        # =========================================================
+        # if task_id in completed_task_ids:
+        #     print(f"Skipping {task_id} - already processed.")
+        #     continue
+        # =========================================================
+        # --- SKIP LOGIC ENDS HERE ---
+        # =========================================================
+        
+        # 2. RUN STAGE 0: Generate the Security Design Context
+        print(f"\n{'='*50}")
+        print(f"Executing Stage 0 for Task ID: {task_id}")
+        print(f"{'='*50}")
+        sdc_brief = generate_sdc_document(original_prompt)
+        
+        # 3. Compile the Enriched Prompt
+        enriched_prompt = f"""
+{sdc_brief}
+
+---
+### DOWNSTREAM IMPLEMENTATION SPECIFICATION
+**FUNCTIONAL REQUIREMENT:**
+{original_prompt}
+
+**EXECUTION INSTRUCTION:** Generate a pristine Python implementation that fulfills the functional requirements while structurally eliminating the threat vectors mapped out in the Security Design Context above. Every identified CWE target must be thoroughly neutralized using the suggested defenses.
+"""
+        
+        # 4. Swap the original prompt with your enriched one inside the dataset entry
+        if 'Prompt' in entry:
+            entry['Prompt'] = enriched_prompt
+        else:
+            entry['prompt'] = enriched_prompt
+            
+        # 5. Hand the enriched entry over to AutoSafeCoder's original workflow
+        system = MultiAgentSystem(entry)
+        system.run()
+
+        # 6. RATE LIMIT PROTECTION TIMER
+        print("\n[Timer] Sleeping for 20 seconds to prevent API rate limiting...")
+        time.sleep(20)
